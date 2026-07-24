@@ -1,0 +1,96 @@
+---
+job: extension
+config:
+  name: refchar_v21_vae_only_refgen_v1_dora64_720
+  process:
+  - type: diffusion_trainer
+    training_folder: /workspace/aitk_runs
+    device: cuda:0
+    performance_log_every: 20
+    network:
+      type: dora
+      linear: 64
+      linear_alpha: 64
+      network_kwargs:
+        # Match the RefChar V17 Stage1 "all layers" scope: 840 transformer
+        # Linear modules on Qwen Image Edit.
+        only_if_contains:
+        - attn.to_q
+        - attn.to_k
+        - attn.to_v
+        - attn.to_out
+        - attn.add_q_proj
+        - attn.add_k_proj
+        - attn.add_v_proj
+        - attn.to_add_out
+        - img_mlp.net
+        - txt_mlp.net
+        - img_mod
+        - txt_mod
+    save:
+      dtype: bf16
+      save_every: 500
+      max_step_saves_to_keep: 8
+    datasets:
+    - folder_path: /workspace/refchar_v21/dataset/target
+      control_path:
+      - /workspace/refchar_v21/dataset/ref0
+      caption_ext: txt
+      caption_dropout_rate: 0.05
+      cache_latents_to_disk: true
+      resolution:
+      - 720
+    train:
+      batch_size: 1
+      # 15,926 pairs x 3 epochs.
+      steps: 47778
+      gradient_accumulation: 1
+      train_unet: true
+      train_text_encoder: false
+      gradient_checkpointing: true
+      noise_scheduler: flowmatch
+      timestep_type: weighted
+      optimizer: adamw8bit
+      lr: 7.5e-05
+      optimizer_params:
+        weight_decay: 0.1
+      cache_text_embeddings: true
+      skip_first_sample: false
+      disable_sampling: false
+      dtype: bf16
+    model:
+      # V21 starts from the V17 Stage1 transformer, not a V20 checkpoint.
+      name_or_path: /workspace/fusal-refchar-v17-stage1/stage2_qwen2511/merged_base/qwen_image_edit_2511_nsfw07_stage1v17s09
+      # The V17 archive contains only the transformer. Load the matching
+      # tokenizer, text encoder, VAE, and processor from a full pipeline.
+      extras_name_or_path: /workspace/fusal-refchar-image-preview
+      arch: qwen_image_edit_plus
+      quantize: false
+      quantize_te: false
+      low_vram: false
+      model_kwargs:
+        match_target_res: false
+        text_conditioning:
+          mode: vae_only
+          template: refchar_generative_v1
+    sample:
+      sampler: flowmatch
+      sample_every: 500
+      width: 1280
+      height: 720
+      samples:
+      - prompt: "生成一张赛璐璐厚涂画风的角色同人插画，将图1中的角色置于蓝色沙发上仰卧的场景：图1中的少女，保持其金发双马尾、紫瞳、尖耳与白皙肤色不变。她身穿灰色衬衫，系着绿色领带，外搭深色红边外套，下身穿着红色格子短裙，右腿佩戴黑色腿环，双腿穿着黑色长筒袜与棕色小皮鞋。少女仰卧在深蓝色的沙发上，双腿向上抬起并弯曲，左手拿着一根棒棒糖靠近嘴边，右手自然放在身侧，表情微讶。画面左下角有一盏亮着的提灯，右侧有绿植叶片。俯视视角构图，光影柔和，色彩丰富。"
+        ctrl_img: /workspace/inference_assets/v_319127/v_319127.source.jpg
+        seed: 42
+        width: 1280
+        height: 720
+        guidance_scale: 4
+        sample_steps: 25
+      neg: ""
+      seed: 42
+      walk_seed: false
+      guidance_scale: 4
+      sample_steps: 25
+meta:
+  name: "[name]"
+  version: "21.0"

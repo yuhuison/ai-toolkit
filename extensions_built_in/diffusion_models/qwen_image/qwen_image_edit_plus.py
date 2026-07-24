@@ -1,30 +1,32 @@
+import hashlib
 import math
-import torch
-from .qwen_image import QwenImageModel
 import os
 from typing import TYPE_CHECKING, List, Optional
+
+import torch
+import torch.nn.functional as F
 import yaml
-from toolkit import train_tools
-from toolkit.config_modules import GenerateImageConfig, ModelConfig
+from diffusers import (
+    AutoencoderKLQwenImage,
+    QwenImageTransformer2DModel,
+)
+from optimum.quanto import QTensor, freeze
 from PIL import Image
-from toolkit.models.base_model import BaseModel
+from tqdm import tqdm
+from transformers import Qwen2_5_VLForConditionalGeneration, Qwen2Tokenizer
+
+from toolkit import train_tools
+from toolkit.accelerator import get_accelerator, unwrap_model
 from toolkit.basic import flush
+from toolkit.config_modules import GenerateImageConfig, ModelConfig
+from toolkit.models.base_model import BaseModel
 from toolkit.prompt_utils import PromptEmbeds
 from toolkit.samplers.custom_flowmatch_sampler import (
     CustomFlowMatchEulerDiscreteScheduler,
 )
-from toolkit.accelerator import get_accelerator, unwrap_model
-from optimum.quanto import freeze, QTensor
-from toolkit.util.quantize import quantize, get_qtype, quantize_model
-import torch.nn.functional as F
+from toolkit.util.quantize import get_qtype, quantize, quantize_model
 
-from diffusers import (
-    QwenImageTransformer2DModel,
-    AutoencoderKLQwenImage,
-)
-from transformers import Qwen2_5_VLForConditionalGeneration, Qwen2Tokenizer
-from tqdm import tqdm
-
+from .qwen_image import QwenImageModel
 
 if TYPE_CHECKING:
     from toolkit.data_transfer_object.data_loader import DataLoaderBatchDTO
@@ -39,6 +41,27 @@ except ImportError:
     raise ImportError(
         "Diffusers is out of date. Update diffusers to the latest version by doing 'pip uninstall diffusers' and then 'pip install -r requirements.txt'"
     )
+
+
+TEXT_ONLY_SYSTEM_PROMPTS = {
+    "edit": (
+        "Describe the key features of the input image (color, shape, size, texture, "
+        "objects, background), then explain how the user's text instruction should "
+        "alter or modify the image. Generate a new image that meets the user's "
+        "requirements while maintaining consistency with the original input where "
+        "appropriate."
+    ),
+    "generative": (
+        "Describe the image by detailing the color, shape, size, texture, quantity, "
+        "text, spatial relationships of the objects and background:"
+    ),
+    "refchar_generative_v1": (
+        "Generate a new image conditioned on a separately provided character reference. "
+        "Use the reference to preserve the character's identity and relevant appearance "
+        "details. Treat the user's prompt as the target image specification, following "
+        "its pose, action, camera view, composition, environment, lighting, and style."
+    ),
+}
 
 
 class QwenImageEditPlusModel(QwenImageModel):
@@ -62,15 +85,99 @@ class QwenImageEditPlusModel(QwenImageModel):
         self.is_transformer = True
         self.target_lora_modules = ["QwenImageTransformer2DModel"]
 
+        text_conditioning = self.model_config.model_kwargs.get(
+            "text_conditioning", {}
+        )
+        if text_conditioning is None:
+            text_conditioning = {}
+        if not isinstance(text_conditioning, dict):
+            raise ValueError("model_kwargs.text_conditioning must be a mapping")
+
+        self.text_conditioning_mode = text_conditioning.get("mode", "dual")
+        if self.text_conditioning_mode not in {"dual", "vae_only"}:
+            raise ValueError(
+                "model_kwargs.text_conditioning.mode must be 'dual' or 'vae_only'"
+            )
+
+        default_template = (
+            "edit"
+            if self.text_conditioning_mode == "dual"
+            else "refchar_generative_v1"
+        )
+        self.text_conditioning_template = text_conditioning.get(
+            "template", default_template
+        )
+        self.text_conditioning_system_prompt = text_conditioning.get(
+            "system_prompt"
+        )
+
+        if self.text_conditioning_mode == "dual":
+            if (
+                self.text_conditioning_template != "edit"
+                or self.text_conditioning_system_prompt is not None
+            ):
+                raise ValueError(
+                    "Dual conditioning uses the native Qwen Image Edit template. "
+                    "Set mode='vae_only' to select a text-only template."
+                )
+        elif self.text_conditioning_system_prompt is None:
+            if self.text_conditioning_template not in TEXT_ONLY_SYSTEM_PROMPTS:
+                available = ", ".join(sorted(TEXT_ONLY_SYSTEM_PROMPTS))
+                raise ValueError(
+                    "Unknown VAE-only text template "
+                    f"'{self.text_conditioning_template}'. Available: {available}; "
+                    "or provide model_kwargs.text_conditioning.system_prompt."
+                )
+            self.text_conditioning_system_prompt = TEXT_ONLY_SYSTEM_PROMPTS[
+                self.text_conditioning_template
+            ]
+        elif not isinstance(self.text_conditioning_system_prompt, str):
+            raise ValueError(
+                "model_kwargs.text_conditioning.system_prompt must be a string"
+            )
+
         # set true for models that encode control image into text embeddings
-        self.encode_control_in_text_embeddings = True
+        self.encode_control_in_text_embeddings = (
+            self.text_conditioning_mode == "dual"
+        )
         # control images will come in as a list for encoding some things if true
         self.has_multiple_control_images = True
         # do not resize control images
         self.use_raw_control_images = True
 
+    @property
+    def text_embedding_space_version(self):
+        if self.text_conditioning_mode == "dual":
+            # Preserve the historical cache key for backward compatibility.
+            return self.arch
+        prompt_hash = hashlib.sha256(
+            self.text_conditioning_system_prompt.encode("utf-8")
+        ).hexdigest()[:12]
+        return (
+            f"{self.arch}:{self.text_conditioning_mode}:"
+            f"{self.text_conditioning_template}:{prompt_hash}"
+        )
+
     def load_model(self):
         super().load_model()
+        if self.text_conditioning_mode == "vae_only":
+            # QwenImageEditPlusModel keeps the visual tower while constructing the
+            # native pipeline. It is not used in VAE-only mode, so release it after
+            # construction. The lightweight processor remains registered because
+            # diffusers requires that pipeline component, but it is never invoked
+            # when precomputed prompt embeddings are supplied.
+            text_encoder = self.text_encoder[0]
+            if getattr(text_encoder.model, "visual", None) is not None:
+                text_encoder.model.visual = None
+                flush()
+            self.print_and_status_update(
+                "Qwen text conditioning: VAE-only "
+                f"({self.text_conditioning_template}); VL image input disabled"
+            )
+        else:
+            self.print_and_status_update(
+                "Qwen text conditioning: dual path (VL image + VAE reference)"
+            )
 
     def get_generation_pipeline(self):
         scheduler = QwenImageModel.get_train_scheduler()
@@ -170,10 +277,99 @@ class QwenImageEditPlusModel(QwenImageModel):
         # we get the control image from the batch
         return latents.detach()
 
+    def _get_text_only_prompt_embeds(self, prompt: List[str]) -> PromptEmbeds:
+        if self.pipeline.text_encoder.device != self.device_torch:
+            self.pipeline.text_encoder.to(self.device_torch)
+
+        if not isinstance(prompt, list):
+            prompt = [prompt]
+
+        system_prompt = self.text_conditioning_system_prompt.strip()
+        prefix = (
+            f"<|im_start|>system\n{system_prompt}<|im_end|>\n"
+            "<|im_start|>user\n"
+        )
+        suffix = "<|im_end|>\n<|im_start|>assistant\n"
+
+        # Compute this from the actual tokenizer instead of copying the native
+        # templates' fixed 34/64-token offsets. This keeps custom templates safe.
+        drop_idx = len(
+            self.pipeline.tokenizer(
+                prefix, add_special_tokens=False
+            ).input_ids
+        )
+        text = [f"{prefix}{item}{suffix}" for item in prompt]
+        tokenizer_max_length = getattr(
+            self.pipeline, "tokenizer_max_length", 1024
+        )
+        tokens = self.pipeline.tokenizer(
+            text,
+            max_length=tokenizer_max_length + drop_idx,
+            padding=True,
+            truncation=True,
+            add_special_tokens=False,
+            return_tensors="pt",
+        ).to(self.device_torch)
+
+        outputs = self.pipeline.text_encoder(
+            input_ids=tokens.input_ids,
+            attention_mask=tokens.attention_mask,
+            output_hidden_states=True,
+        )
+        hidden_states = outputs.hidden_states[-1]
+        bool_mask = tokens.attention_mask.bool()
+        valid_lengths = bool_mask.sum(dim=1)
+        selected = hidden_states[bool_mask]
+        split_hidden_states = torch.split(
+            selected, valid_lengths.tolist(), dim=0
+        )
+        split_hidden_states = [item[drop_idx:] for item in split_hidden_states]
+
+        attn_mask_list = [
+            torch.ones(item.size(0), dtype=torch.long, device=item.device)
+            for item in split_hidden_states
+        ]
+        max_seq_len = max(item.size(0) for item in split_hidden_states)
+        prompt_embeds = torch.stack(
+            [
+                torch.cat(
+                    [
+                        item,
+                        item.new_zeros(
+                            max_seq_len - item.size(0), item.size(1)
+                        ),
+                    ]
+                )
+                for item in split_hidden_states
+            ]
+        )
+        prompt_embeds_mask = torch.stack(
+            [
+                torch.cat(
+                    [
+                        item,
+                        item.new_zeros(max_seq_len - item.size(0)),
+                    ]
+                )
+                for item in attn_mask_list
+            ]
+        )
+
+        pe = PromptEmbeds(
+            prompt_embeds.to(
+                dtype=self.torch_dtype, device=self.device_torch
+            )
+        )
+        pe.attention_mask = prompt_embeds_mask
+        return pe
+
     def get_prompt_embeds(self, prompt: List, control_images=None) -> PromptEmbeds:
         # todo handle not caching text encoder
         if self.pipeline.text_encoder.device != self.device_torch:
             self.pipeline.text_encoder.to(self.device_torch)
+
+        if self.text_conditioning_mode == "vae_only":
+            return self._get_text_only_prompt_embeds(prompt)
             
         if control_images is None:
             raise ValueError("Missing control images for QwenImageEditPlusModel")
