@@ -60,3 +60,15 @@ The executable configuration is:
 For inference, load the Stage1.5-equivalent merged transformer and apply the
 Stage2 LoRA at multiplier 1.0. Loading Stage2 directly on a bare Klein model is
 not equivalent to the training stack.
+
+## Launch validation
+
+The production configuration was validated on an RTX PRO 6000 Blackwell:
+
+- all four caches completed: 9,978 I2I latent/text and 2,494 T2I latent/text;
+- all 12 baseline reference samples were generated at their configured sizes;
+- the LoRA attached to exactly 32 transformer Linear modules;
+- batch-two training completed more than 20 optimizer steps without an OOM,
+  non-finite loss, or reference-shape error;
+- the first ten measured loops averaged about 2.17 seconds per step and used
+  about 25.6 GB VRAM with gradient checkpointing.
