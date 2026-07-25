@@ -1,0 +1,192 @@
+---
+job: extension
+config:
+  name: refchar_v21_flux_stage2_ref_lora32_720
+  process:
+  - type: sd_trainer
+    training_folder: /workspace/refchar_v21_flux/output
+    device: cuda:0
+    performance_log_every: 20
+
+    network:
+      type: lora
+      linear: 32
+      linear_alpha: 32
+      transformer_only: true
+      network_kwargs:
+        # Stage2 learns reference routing without reopening the MLP/style path:
+        # 8 double blocks x (image/text QKV + output) = 32 Linear modules.
+        only_if_contains:
+        - img_attn
+        - txt_attn
+
+    save:
+      dtype: bf16
+      save_every: 1000
+      max_step_saves_to_keep: 20
+      push_to_hub: false
+
+    datasets:
+    # Main I2I task: 9,978 balanced pairs after removing 22 near-duplicates.
+    - folder_path: /workspace/refchar_v21/dataset_balanced10k_filtered/target
+      control_path: /workspace/refchar_v21_flux/data/stage2_i2i_ref_square720
+      caption_ext: txt
+      caption_dropout_rate: 0.0
+      shuffle_tokens: false
+      cache_latents_to_disk: true
+      cache_text_embeddings: true
+      resolution:
+      - 720
+      buckets: true
+      num_workers: 4
+      prefetch_factor: 2
+
+    # 20% T2I rehearsal, stratified from the same effective balanced pool.
+    - folder_path: /workspace/refchar_v21_flux/data/stage2_t2i_rehearsal2494
+      caption_ext: txt
+      caption_dropout_rate: 0.0
+      shuffle_tokens: false
+      cache_latents_to_disk: true
+      cache_text_embeddings: true
+      resolution:
+      - 720
+      buckets: true
+      num_workers: 4
+      prefetch_factor: 2
+
+    train:
+      batch_size: 2
+      # FLUX.2 uses 16-pixel bucket divisibility: 5,013 I2I + 1,265 T2I
+      # batches/epoch. 6,278 x 3 epochs = 18,834 optimizer steps.
+      steps: 18834
+      gradient_accumulation: 1
+      train_unet: true
+      train_text_encoder: false
+      gradient_checkpointing: true
+      noise_scheduler: flowmatch
+      timestep_type: shift
+      optimizer: adamw8bit
+      lr: 3.0e-05
+      optimizer_params:
+        weight_decay: 0.0
+      lr_scheduler: constant_with_warmup
+      lr_scheduler_params:
+        num_warmup_steps: 300
+      max_grad_norm: 1.0
+      skip_first_sample: false
+      disable_sampling: false
+      dtype: bf16
+
+    model:
+      # Fixed effective base: community NSFW LoKr@0.7 + old Stage1 LoKr@1.0
+      # + completed Stage1.5-10000 all-layer T2I LoRA@1.0.
+      name_or_path: /workspace/refchar_v21_flux/models/flux2-klein-9b-nsfw0.7-stage1-stage15-merged.safetensors
+      te_name_or_path: /workspace/refchar_v21_flux/models/uncensored_qwen3
+      vae_path: /workspace/refchar_v21_flux/models/ae.safetensors
+      arch: flux2_klein_9b
+      quantize: false
+      quantize_te: false
+      low_vram: false
+      model_kwargs:
+        # References are already standardized to 720x720, keeping the reference
+        # sequence length identical inside every batch.
+        match_target_res: false
+
+    sample:
+      sampler: flowmatch
+      sample_every: 500
+      sample_start_step: 0
+      samples:
+      - prompt: "生成一张赛璐璐平涂画风的角色同人插画，将图1中的少女置于海滩躺椅上休息的场景：图1中的少女，保持其深蓝色盘发、蓝色蝴蝶发饰、青色双瞳与头顶光环不变。她身穿黑色比基尼泳装，上衣带有金色花纹，脖子上挂着墨镜，外搭一件半褪的黑色防晒衫。她正靠坐在白色沙滩躺椅上，双腿抬起并交叉，赤足朝向镜头，左手轻托下巴，神情慵懒。背景是晴朗的蓝天、大海与沙滩，身旁小桌上放着一杯冰镇饮料，上方有遮阳伞。画面采用平视视角，光影明亮，带有夏日氛围。"
+        ctrl_img: /workspace/refchar_v21/sample_set/reference/00_holdout_sfw_v_378787.jpg
+        seed: 42000
+        width: 864
+        height: 608
+        guidance_scale: 4
+        sample_steps: 25
+      - prompt: "生成一张赛璐璐平涂画风的角色同人插画，将图1中的角色置于床铺上的场景：图1中的少女，保持其银色长发、红色双瞳与头部的白色发饰不变。她身穿一件白色无袖连衣裙，胸前有黑色半透明材质拼接，领口系着黄色领结，左臂戴着黑色长手套，左腿大腿处戴着带有黑白三角形图案的腿环。少女双腿交叠坐在铺着格纹床单的床上，右手撑在身侧，左手轻抚胸前，微微歪头看向镜头，表情略显羞涩。背景是柔软的枕头和床铺，阳光透过窗户在床上投下斑驳的光影。画面采用平视视角，光影柔和，色彩明亮。"
+        ctrl_img: /workspace/refchar_v21/sample_set/reference/01_holdout_sfw_d_4933572.jpg
+        seed: 42001
+        width: 544
+        height: 928
+        guidance_scale: 4
+        sample_steps: 25
+      - prompt: "生成一张赛璐璐厚涂画风的角色同人插画，将图1中的少女置于窗边软榻上仰卧的场景：图1中的少女，保持其银白色短发与蓝紫色双瞳不变。她身穿一件带有金色镶边的白色华丽礼服，上半身紧身设计微微露出乳沟，双手戴着白色长手套。下半身层层叠叠的白色裙摆散落铺开，她双腿弯曲抬起，穿着带有金色花纹边缘的白色过膝袜与白色高跟鞋，姿势使得大腿根部与部分臀部肌肤裸露在外。少女仰卧在灰色的长条软榻上，双手弯曲枕于脑后，神情微带慵懒地看向镜头。画面中散落着几片红色花瓣，身旁的落地窗外是飘雪的冬季树林。斜向俯视的全身构图，冷暖对比的光影营造出唯美细腻的氛围。"
+        ctrl_img: /workspace/refchar_v21/sample_set/reference/02_holdout_sfw_327010.jpg
+        seed: 42002
+        width: 832
+        height: 640
+        guidance_scale: 4
+        sample_steps: 25
+      - prompt: "生成一张赛璐璐厚涂画风的角色同人插画，将图1中的角色置于赌场赌桌上被红色绳索紧紧捆绑的场景：图1中的少女，保持其黑色长发与面部特征不变。她头顶长着一对黑色兔耳，右侧佩戴一朵蓝色花朵发饰，双眼变为绿色。她身穿蓝色紧身连体衣，露出丰满的乳房与大腿，下半身穿着蓝白条纹过膝袜与蓝色高跟鞋。少女呈俯卧姿势趴在绿色的赌桌上，双手被反绑在身后，双腿向后弯曲翘起，全身被红色绳索以龟甲缚等方式紧紧勒住，口中戴着黑色口球，表情显得有些痛苦与无奈。赌桌上散落着几摞筹码，背景是红色的帷幕与华丽的吊灯，右侧有发光的霓虹灯牌。画面采用平视视角，光影丰富，色彩鲜艳。"
+        ctrl_img: /workspace/refchar_v21/sample_set/reference/03_holdout_nsfw_d_5701816.jpg
+        seed: 42003
+        width: 800
+        height: 640
+        guidance_scale: 4
+        sample_steps: 25
+      - prompt: "生成一张赛璐璐平涂画风的角色同人插画，将图1中的角色全裸俯卧在地面上：图1中的少女，保持其黑发红挑染、兽耳、头顶的红色樱花光环与金黄色双瞳不变。她全身赤裸，仅双脚穿着深色厚底木屐，右大腿根部绑着紫色花朵绳饰，头发两侧佩戴着紫色花朵与三色丸子发饰。她呈俯卧姿势趴在光洁的地面上，上半身微微抬起，双乳下垂贴近地面，臀部高高翘起，双小腿向后上方弯曲。她面带微笑，左手轻触下巴，右手握着一把撑开的浅紫色和伞的伞柄，和伞作为背景立于她的身后。她身后长着一条粗大的黑色兽尾，尾巴向上卷起，末端装饰着粉色花朵。画面背景为纯白，地面清晰倒映出角色的身影，光影柔和细腻，全身平视构图。"
+        ctrl_img: /workspace/refchar_v21/sample_set/reference/04_holdout_nsfw_360519.jpg
+        seed: 42004
+        width: 832
+        height: 608
+        guidance_scale: 4
+        sample_steps: 25
+      - prompt: "生成一张平涂画风的角色同人插画，将图1中的少女置于纯白背景中呈现跪伏姿态：图1中的少女，保持其粉蓝渐变长发、紫色双瞳与发饰不变。她上半身赤裸，露出侧乳与乳头，下半身仅穿着白色过膝袜，腰间系着带有白色蝴蝶结的蓝紫色裙摆，裙摆向两侧铺开。她背对镜头双膝跪地，上半身向前趴伏，臀部高高翘起，完全暴露出肛门与外阴。她头部向右侧偏转，脸颊贴地，眼神迷离地看向镜头。画面背景为纯白色，光影柔和，肤色质感细腻。"
+        ctrl_img: /workspace/refchar_v21/sample_set/reference/05_holdout_nsfw_334548.jpg
+        seed: 42005
+        width: 864
+        height: 608
+        guidance_scale: 4
+        sample_steps: 25
+      - prompt: "生成一张赛璐璐厚涂画风的角色同人插画，将图1中的角色置于蓝色沙发上仰卧的场景：图1中的少女，保持其金发双马尾、紫瞳、尖耳与白皙肤色不变。她身穿灰色衬衫，系着绿色领带，外搭深色红边外套，下身穿着红色格子短裙，右腿佩戴黑色腿环，双腿穿着黑色长筒袜与棕色小皮鞋。少女仰卧在深蓝色的沙发上，双腿向上抬起并弯曲，左手拿着一根棒棒糖靠近嘴边，右手自然放在身侧，表情微讶。画面左下角有一盏亮着的提灯，右侧有绿植叶片。俯视视角构图，光影柔和，色彩丰富。"
+        ctrl_img: /workspace/refchar_v21/sample_set/reference/06_train_sfw_v_319127.jpg
+        seed: 42006
+        width: 864
+        height: 608
+        guidance_scale: 4
+        sample_steps: 25
+      - prompt: "生成一张赛璐璐平涂画风的角色同人插画，将图1中的角色置于室内木地板上、手持书本靠墙而坐的场景：图1中的少女，保持其黑色长发与蓝色眼眸的特征不变。她身穿黑色制服外套，内搭白色衬衫与红色领结，下身穿着格纹百褶裙与黑色过膝袜，脚踩灰色运动鞋。她靠着墙壁坐在木地板上，双腿向前伸展，右手拿着一本绿色的书抵在下巴处，神情平静地看向画面右侧。身旁放着一个蓝色的学生书包。画面左侧有强烈的阳光透过窗户照射进来，在木地板上形成明亮的方形光斑与树叶的剪影，空气中飘浮着白色的光尘。整体构图为全身俯视视角，光影对比强烈，色彩偏冷调。"
+        ctrl_img: /workspace/refchar_v21/sample_set/reference/07_train_sfw_303080.jpg
+        seed: 42007
+        width: 832
+        height: 608
+        guidance_scale: 4
+        sample_steps: 25
+      - prompt: "生成一张赛璐璐画风的角色同人插画，将图1中的角色置于厨房中煎荷包蛋的场景：图1中的女性角色，保持其面部特征、棕色长发、高马尾、紫色花朵发饰与黄色眼瞳不变。她身穿一件白色挂脖围裙，围裙下隐约可见原本的紫色比基尼上衣，脖子上戴着紫色印花围巾，下半身穿着带有金色镶边和紫色绑带的短裙，双手戴着深色手套与紫色护臂。她正站在厨房的炉灶前，右手拿着锅铲，左手握着平底锅的把手，锅里正在煎着两个荷包蛋。她微微弯腰，抬头微笑着看向镜头。背景是厨房的瓷砖墙壁、炉灶和木质地板。画面采用俯视视角，光线明亮，色彩鲜艳。"
+        ctrl_img: /workspace/refchar_v21/sample_set/reference/08_train_sfw_322295.jpg
+        seed: 42008
+        width: 960
+        height: 544
+        guidance_scale: 4
+        sample_steps: 25
+      - prompt: "生成一张赛璐璐厚涂画风的角色同人插画，展现图1角色的性感姿态：图1中的女性角色，保持其银白长发与紫瞳不变。她身穿黑色半透明蕾丝内衣、黑色蕾丝长筒袜与薄纱外衣，脖戴项圈。内衣透出乳头，内裤裆部开叉露出外阴（有打码条），爱液顺大腿流下，一根粉色管子连至裆部。她双腿分开站立，双手拉开外衣下摆，面带红晕，嘴角流涎。仰视视角，背景为带天窗的简约室内，顶光照射。"
+        ctrl_img: /workspace/refchar_v21/sample_set/reference/09_train_nsfw_d_5032514.jpg
+        seed: 42009
+        width: 608
+        height: 864
+        guidance_scale: 4
+        sample_steps: 25
+      - prompt: "生成一张赛璐璐厚涂画风的角色同人插画，将图1中的角色置于床上被红色绳索捆绑的场景：图1中的少女，保持其粉色长发、蓝色双瞳与头顶的黑色蝴蝶结发饰不变。她全身赤裸，仅被红色的绳索紧紧捆绑，绳索勒过她丰满的乳房、腰部和双腿，一根绳索从双腿间穿过，勒住外阴。她的嘴里戴着一个黑色的口交球，有口水流出。少女仰卧在铺着白色床单的铁架床上，双腿大张，正对镜头，露出外阴和肛门，大腿和腹部有汗水或爱液的反光。她面色潮红，眼神迷离地看着镜头。背景是昏暗的房间，床单上有褶皱，旁边散落着一条粉色内裤。画面采用平视视角，光影对比强烈，凸显了肉体的质感。"
+        ctrl_img: /workspace/refchar_v21/sample_set/reference/10_train_nsfw_351571.jpg
+        seed: 42010
+        width: 832
+        height: 640
+        guidance_scale: 4
+        sample_steps: 25
+      - prompt: "生成一张赛璐璐平涂画风的角色同人插画，将图1中的角色置于户外栏杆前、背对镜头俯身撅臀的场景：图1中的女性角色，保持其金发、尖耳与面部特征不变。她上半身穿着带有金色肩甲的短袖上衣，背部大面积裸露，下半身仅穿着一条带有镂空花纹的紫色丁字裤，暴露出丰满的臀部与大腿，股沟与外阴部分隐约可见。她背对镜头，双手撑在身前的木质栏杆上，上半身前倾，臀部高高翘起朝向镜头，头部向右后方回眸，眼神瞥向镜头。背景是傍晚时分的山脉与云层。画面采用从后方平视的视角，重点刻画了臀部的肉感与高光，光影柔和，色彩偏暖。"
+        ctrl_img: /workspace/refchar_v21/sample_set/reference/11_train_nsfw_304289.jpg
+        seed: 42011
+        width: 800
+        height: 640
+        guidance_scale: 4
+        sample_steps: 25
+      neg: ""
+      seed: 42
+      walk_seed: false
+      guidance_scale: 4
+      sample_steps: 25
+
+meta:
+  name: "[name]"
+  version: "21-stage2"
