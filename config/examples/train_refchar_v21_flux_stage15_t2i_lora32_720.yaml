@@ -1,0 +1,118 @@
+---
+job: extension
+config:
+  name: refchar_v21_flux_stage15_t2i_lora32_720
+  process:
+  - type: sd_trainer
+    training_folder: /workspace/refchar_v21_flux/output
+    device: cuda:0
+    performance_log_every: 20
+
+    network:
+      type: lora
+      linear: 32
+      linear_alpha: 32
+      # No module filter: cover every Linear inside all eight double blocks and
+      # all 24 single blocks (112 modules, about 82.8M trainable parameters).
+      transformer_only: true
+
+    save:
+      dtype: bf16
+      save_every: 1000
+      max_step_saves_to_keep: 10
+      push_to_hub: false
+
+    datasets:
+    - folder_path: /workspace/refchar_v21_flux/data/stage15_t2i_balanced10k
+      caption_ext: txt
+      caption_dropout_rate: 0.0
+      shuffle_tokens: false
+      cache_latents_to_disk: true
+      cache_text_embeddings: true
+      resolution:
+      - 720
+      buckets: true
+      num_workers: 4
+      prefetch_factor: 2
+
+    train:
+      batch_size: 2
+      # 10,000 images / batch 2 * 2 epochs.
+      steps: 10000
+      gradient_accumulation: 1
+      train_unet: true
+      train_text_encoder: false
+      gradient_checkpointing: false
+      noise_scheduler: flowmatch
+      timestep_type: shift
+      optimizer: adamw8bit
+      lr: 5.0e-05
+      optimizer_params:
+        weight_decay: 0.0
+      lr_scheduler: constant_with_warmup
+      lr_scheduler_params:
+        num_warmup_steps: 200
+      max_grad_norm: 1.0
+      skip_first_sample: false
+      disable_sampling: false
+      dtype: bf16
+
+    model:
+      name_or_path: /workspace/refchar_v21_flux/models/flux2-klein-9b-nsfw0.7-stage1-merged.safetensors
+      te_name_or_path: /workspace/refchar_v21_flux/models/uncensored_qwen3
+      vae_path: /workspace/refchar_v21_flux/models/ae.safetensors
+      arch: flux2_klein_9b
+      quantize: false
+      quantize_te: false
+      low_vram: false
+
+    sample:
+      sampler: flowmatch
+      sample_every: 500
+      sample_start_step: 0
+      samples:
+      - prompt: "一幅二次元风格的插画，描绘一位粉发美少女侧躺在明亮的卧室床铺上。她有着粉红色长发扎成的侧马尾，刘海整齐，头上戴有银色发夹，一双紫红色的大眼睛注视镜头，眼角带笑，脸颊泛起红晕，表情温柔而略带羞涩。她身穿白色短袖水手服上衣，配有深蓝色的翻领和白色条纹，胸前系着一条红色领巾；上半身侧卧，胸部位置放着一颗完整的橙子。她的头部枕在洁白的枕头上，一只手臂弯曲着放在身前。背景是柔和透光的白色窗帘与窗户，室内光线明亮温暖，整体氛围清新柔和。"
+        seed: 4201
+        width: 1024
+        height: 720
+        guidance_scale: 4
+        sample_steps: 25
+      - prompt: "日系二次元插画风格，柔和光影与细腻皮肤质感。一位女性角色慵懒地坐在户外躺椅上，她有着白色高马尾长发并带粉红色挑染，头顶生有红色龙角，佩戴黑色帽状发饰配红色装饰，尖耳朵，淡紫色眼瞳，耳坠为红色流苏状；身材丰满，皮肤白皙。身着红白配色比基尼泳装，一侧为白色、另一侧为红色底配金色火焰龙纹图案。她双腿交叠，右臂高举搭在躺椅靠背，嘴角微扬。背景是阳光明媚的泳池边场景，采用中景略带俯视视角。"
+        seed: 4202
+        width: 720
+        height: 1024
+        guidance_scale: 4
+        sample_steps: 25
+      - prompt: "日系二次元插画风格，色彩明亮，线条清晰。一位粉色长发少女，发尾带有淡紫渐变，左侧头发梳成环形发圈并系有蓝白条纹蝴蝶结，头顶佩戴小型粉色皇冠。她有紫罗兰色与碧绿色异色瞳，身穿粉色公主风连衣裙，双手高举一把巨大的深色金属战斧扛于身后，身体呈现战斗姿态，张嘴呐喊。背景是淡蓝色天空搭配白色光点与速度线，采用低角度仰视构图。"
+        seed: 4203
+        width: 720
+        height: 1024
+        guidance_scale: 4
+        sample_steps: 25
+      - prompt: "数字绘画风格，柔和光影与细腻皮肤质感，暖色调。一名年轻女性，黑色长直发配齐刘海，头顶大型黑色蝴蝶结并饰有红色缎带，紫色眼瞳，面带轻微笑容与脸颊红晕。身穿黑色连衣裙式上衣，红色蕾丝装饰，前襟敞开露出腹部与胸部下侧，下着黑色蕾丝内裤，腿部穿戴黑色过膝袜。她向左侧卧于红色天鹅绒沙发上，一手托脸，另一手放在大腿根部。中景略俯视构图。"
+        seed: 4204
+        width: 1024
+        height: 720
+        guidance_scale: 4
+        sample_steps: 25
+      - prompt: "二次元动漫插画风格，精细柔和的上色与光影。一名银白色长发、蓝色大眼睛的成年女性，脸颊泛红，身体前倾，双手扶着墙壁，臀部向后翘起。她的白色无袖连衣裙裙摆掀起至腰部，下半身全裸，臀部与外阴裸露，下体有湿润液体，一只从画面下方伸入的手握住其臀部。背景为昏暗室内，采用低角度后方视角。"
+        seed: 4205
+        width: 720
+        height: 1024
+        guidance_scale: 4
+        sample_steps: 25
+      - prompt: "日系二次元平涂风格插画，极简纯白色背景。画面中央是一名金色长发、黄色眼瞳的成年女性仰卧于白色平面上，长发扎成低双马尾并散落身下，脸颊泛红。她身着白色细肩带内衣与三角内裤，并穿着黑色过膝长袜。双腿屈膝向两侧分开抬起，左手放在腹部，右手弯曲置于头侧。柔和光影，全身构图。"
+        seed: 4206
+        width: 1024
+        height: 720
+        guidance_scale: 4
+        sample_steps: 25
+      neg: ""
+      seed: 42
+      walk_seed: false
+      guidance_scale: 4
+      sample_steps: 25
+
+meta:
+  name: "[name]"
+  version: "21-stage1.5"
