@@ -1,14 +1,14 @@
 ---
 job: extension
 config:
-  name: refchar_v21_vae_only_refgen_v1_dora64_720
+  name: refchar_v21_vae_only_refgen_v2_lora64_720
   process:
   - type: diffusion_trainer
     training_folder: /workspace/aitk_runs
     device: cuda:0
     performance_log_every: 20
     network:
-      type: dora
+      type: lora
       linear: 64
       linear_alpha: 64
       network_kwargs:
@@ -51,9 +51,12 @@ config:
       noise_scheduler: flowmatch
       timestep_type: weighted
       optimizer: adamw8bit
-      lr: 7.5e-05
+      lr: 1.0e-05
       optimizer_params:
-        weight_decay: 0.1
+        weight_decay: 0.0
+      lr_scheduler: constant_with_warmup
+      lr_scheduler_params:
+        num_warmup_steps: 200
       cache_text_embeddings: true
       skip_first_sample: false
       disable_sampling: false
